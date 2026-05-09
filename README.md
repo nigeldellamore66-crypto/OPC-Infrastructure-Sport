@@ -24,7 +24,7 @@ Redpanda (topics)
 ## Prérequis
 
 - Docker Desktop ou Docker Engine + Docker Compose v2
-- 16 Go de RAM minimum (8 Go pour la stack, le reste pour le système)
+- 16 Go de RAM minimum 
 - Ports libres sur la machine hôte: 5432, 8080, 8081, 8082, 8083, 8088,
   9000, 9001, 9090, 3000, 19092
 
@@ -74,12 +74,3 @@ sport-data-poc/
 ├── monitoring/                 ← Prometheus + Grafana
 └── scripts/                    ← scripts utilitaires
 ```
-
-## Étapes suivantes
-
-- [ ] Implémenter le simulateur Strava (historique 12 mois + live)
-- [ ] Job Spark Streaming `slack-notifier`
-- [ ] DAG Airflow `bronze_to_silver_to_gold`
-- [ ] Tests Great Expectations
-- [ ] Dashboard Power BI
-- [ ] Dashboards Grafana (lag Redpanda, exécutions DAG, volumétrie)
