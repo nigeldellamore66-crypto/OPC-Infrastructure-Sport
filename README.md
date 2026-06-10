@@ -9,7 +9,7 @@ Le projet démontre une chaîne data complète : capture temps réel (CDC), trai
 
 ---
 
-## Résultats clés (jeu de données de démo)
+## Résultats clés obtenus
 
 | Indicateur | Valeur |
 |---|---|
@@ -48,7 +48,7 @@ Monitoring    : Prometheus + Grafana
 - **Temps réel** — un INSERT en base est capté par Debezium, publié sur Redpanda, consommé par Spark Streaming qui notifie Slack en quelques secondes.
 - **Batch** — le pipeline médaillon raffine la donnée (Bronze brut → Silver nettoyé/enrichi → Gold table de faits), orchestré quotidiennement par Airflow.
 
-**Principe d'architecture clé :** l'historique vit dans **Delta/MinIO** (source de vérité, time travel) ; **Postgres analytics** n'est qu'une vitrine de service pour la BI (dernier état uniquement, réécrit à chaque run).
+**Principe d'architecture :** l'historique vit dans **Delta/MinIO** (source de vérité, time travel) ; **Postgres analytics** est interrogé par la BI (dernier état uniquement, réécrit à chaque run).
 
 ---
 
@@ -114,7 +114,7 @@ Le pipeline médaillon est orchestré par Airflow. Pour le déclencher :
 
 1. Ouvrir Airflow : http://localhost:8088
 2. Activer le DAG `sport_data_pipeline`
-3. Le déclencher manuellement (**▶ Trigger DAG**) ou attendre le run quotidien
+3. Le déclencher manuellement (**Trigger DAG**) ou attendre le run quotidien
 
 Le DAG enchaîne `bronze >> silver >> gold` via `SparkSubmitOperator`. À la fin, la table de faits `analytics.fct_employee_eligibility` est disponible dans Postgres pour Power BI.
 
@@ -206,7 +206,7 @@ sport-data-poc/
 
 ## Paramétrage métier
 
-Les règles de calcul sont **externalisées** dans la table `analytics.dim_parameters` (modifiables sans toucher au code) :
+Les règles de calcul sont **externalisées** dans la table `analytics.dim_parameters` :
 
 | Paramètre | Valeur par défaut | Description |
 |---|---|---|
@@ -217,6 +217,11 @@ Les règles de calcul sont **externalisées** dans la table `analytics.dim_param
 | `max_distance_bike_km` | 25 | Distance max éligible à vélo |
 
 Le job Gold lit la ligne la plus récente (`ORDER BY snapshot_date DESC LIMIT 1`). Modifier un paramètre puis relancer le DAG suffit à recalculer les éligibilités.
+
+Exemple pour modifier le taux de la prime de mobilité à 8%:
+```bash
+docker exec sport-postgres psql -U sportadmin -d sportdata -c "UPDATE analytics.dim_parameters SET premium_rate = 0.0800;"
+```
 
 ---
 
@@ -237,17 +242,16 @@ Le timeout Gunicorn est porté à 300 s dans le compose. Laisser 2-3 min au prem
 **Le DAG échoue avec une erreur de version Python**
 Le driver (Airflow) et le worker Spark doivent être alignés sur Python 3.8. C'est déjà configuré dans les images fournies.
 
-**Re-run du pipeline : idempotence**
+**Re-run du pipeline**
 Le pipeline est idempotent. Delta utilise `replaceWhere` par `snapshot_date` ; l'export Postgres utilise `overwrite` + `truncate=true`. Un re-run produit exactement le même résultat, sans doublon.
 
 ---
 
-## Choix techniques (justification)
+## Choix techniques
 
 - **Redpanda plutôt que Kafka** — compatible API Kafka, sans Zookeeper, plus léger à conteneuriser pour un POC.
 - **Delta Lake** — transactions ACID sur le lakehouse, time travel, `replaceWhere` pour l'idempotence.
 - **Séparation Delta / Postgres** — le lakehouse porte l'historique, Postgres ne sert que la BI. Évite la redondance et clarifie les responsabilités.
-- **CDC plutôt que polling** — réaction à l'événement, pas d'interrogation périodique de la base.
 - **Tests conteneurisés** — reproductibilité, cohérence avec l'architecture tout-Docker.
 - **Monitoring du débit** — métrique de santé réellement exposée par Redpanda, à défaut du lag consumer.
 
@@ -259,4 +263,3 @@ Le pipeline est idempotent. Delta utilise `replaceWhere` par `snapshot_date` ; l
 - Externaliser les secrets (Vault) plutôt que `.env`.
 - Séparer l'export Postgres dans un job dédié.
 - Provisionner les dashboards Grafana en JSON (reproductibilité au démarrage).
-- CI/CD et déploiement sur cluster managé (Kubernetes).
