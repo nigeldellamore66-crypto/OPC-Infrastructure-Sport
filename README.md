@@ -75,7 +75,7 @@ Monitoring    : Prometheus + Grafana
 - 16 Go de RAM minimum
 - Ports libres sur la machine hôte : `5433`, `8080`, `8081`, `8082`, `8083`, `8088`, `9000`, `9001`, `9090`, `3000`, `19092`
 
-> ⚠️ **Postgres est exposé sur le port `5433`** côté hôte (et non 5432) pour éviter un conflit avec une éventuelle instance PostgreSQL locale. En interne Docker, les services communiquent toujours via `postgres:5432`.
+> **Postgres est exposé sur le port `5433`** côté hôte (et non 5432) pour éviter un conflit avec une éventuelle instance PostgreSQL locale. En interne Docker, les services communiquent toujours via `postgres:5432`.
 
 ---
 
@@ -170,6 +170,8 @@ Grafana expose un dashboard **Sport Data** avec trois familles de métriques :
 
 > Le lag consumer n'étant pas exposé nativement par Redpanda, le monitoring s'appuie sur le **débit** (métrique de santé équivalente, réellement disponible).
 
+> Les sources de données (Prometheus, PostgreSQL) et les dashboards Grafana sont configurés manuellement via l'interface (http://localhost:3000, admin / cf `.env`). Prometheus, lui, est provisionné par `monitoring/prometheus.yml`.
+
 ---
 
 ## Structure du projet
@@ -197,8 +199,7 @@ sport-data-poc/
 ├── tests/
 │   └── run_quality_checks.py   ← suite Great Expectations (5 expectations)
 └── monitoring/
-    ├── prometheus.yml          ← cibles de scraping (Redpanda, MinIO, Prometheus)
-    └── grafana/                ← provisioning des dashboards
+    └── prometheus.yml          ← cibles de scraping (Redpanda, MinIO, Prometheus)
 ```
 
 ---
@@ -257,4 +258,5 @@ Le pipeline est idempotent. Delta utilise `replaceWhere` par `snapshot_date` ; l
 - Migrer l'API Google Distance Matrix vers Routes API (plus précise).
 - Externaliser les secrets (Vault) plutôt que `.env`.
 - Séparer l'export Postgres dans un job dédié.
+- Provisionner les dashboards Grafana en JSON (reproductibilité au démarrage).
 - CI/CD et déploiement sur cluster managé (Kubernetes).
