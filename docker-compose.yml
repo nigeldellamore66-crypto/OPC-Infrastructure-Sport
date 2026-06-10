@@ -1,0 +1,350 @@
+# Sport Data Solution — POC Avantages Sportifs
+# Stack: Postgres + Debezium + Redpanda + Spark + MinIO + Airflow + Prometheus/Grafana
+
+name: sport-data-poc
+
+services:
+  # Postgres(RH + activités)
+  postgres:
+    image: postgres:16-alpine
+    container_name: sport-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql/init:/docker-entrypoint-initdb.d:ro
+    command: >
+      postgres
+      -c wal_level=logical 
+      -c max_replication_slots=4
+      -c max_wal_senders=4
+      -c listen_addresses=*
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [sport-net]
+
+  # Redpanda — bus d'événements compatible Kafka
+  redpanda:
+    image: redpandadata/redpanda:v24.2.7
+    container_name: sport-redpanda
+    restart: unless-stopped
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --memory=1G
+      - --reserve-memory=0M
+      - --overprovisioned
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092,OUTSIDE://0.0.0.0:19092
+      - --advertise-kafka-addr=PLAINTEXT://redpanda:9092,OUTSIDE://localhost:19092
+    ports:
+      - "19092:19092"   # Kafka API depuis l'hôte
+      - "9644:9644"     # Admin API
+    volumes:
+      - redpanda_data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true'"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [sport-net]
+
+  redpanda-console:
+    image: redpandadata/console:v2.7.2
+    container_name: sport-redpanda-console
+    restart: unless-stopped
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+      CONNECT_ENABLED: "true"
+      CONNECT_CLUSTERS_NAME: kafka-connect
+      CONNECT_CLUSTERS_URL: http://kafka-connect:8083
+    ports:
+      - "8080:8080"     # UI sur http://localhost:8080
+    depends_on:
+      redpanda:
+        condition: service_healthy
+    networks: [sport-net]
+
+  # Kafka Connect + Debezium — CDC depuis Postgres
+  kafka-connect:
+    image: debezium/connect:2.7.3.Final
+    container_name: sport-kafka-connect
+    restart: unless-stopped
+    depends_on:
+      redpanda:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8083:8083"
+    environment:
+      BOOTSTRAP_SERVERS: redpanda:9092
+      GROUP_ID: connect-cluster
+      CONFIG_STORAGE_TOPIC: _connect_configs
+      OFFSET_STORAGE_TOPIC: _connect_offsets
+      STATUS_STORAGE_TOPIC: _connect_statuses
+      KEY_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      KEY_CONVERTER_SCHEMAS_ENABLE: "false"
+      VALUE_CONVERTER_SCHEMAS_ENABLE: "false"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083/connectors"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [sport-net]
+
+
+  # MinIO — stockage objet S3-compatible (Delta Lake)
+  minio:
+    image: minio/minio:RELEASE.2024-10-13T13-34-11Z
+    container_name: sport-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      MINIO_PROMETHEUS_AUTH_TYPE: "public" # permet l'accès à prometheus
+    ports:
+      - "9000:9000"     # API S3
+      - "9001:9001"     # Console web sur http://localhost:9001
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [sport-net]
+
+  # Job one-shot qui crée le bucket "lakehouse" au démarrage
+  minio-init:
+    image: minio/mc:RELEASE.2024-10-08T09-37-26Z
+    container_name: sport-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 ${MINIO_ROOT_USER} ${MINIO_ROOT_PASSWORD};
+      mc mb --ignore-existing local/lakehouse;
+      mc mb --ignore-existing local/lakehouse/bronze;
+      mc mb --ignore-existing local/lakehouse/silver;
+      mc mb --ignore-existing local/lakehouse/gold;
+      echo 'Buckets MinIO initialisés';
+      "
+    networks: [sport-net]
+
+  # Spark — Master + Worker pour batch et streaming
+  spark-master:
+      build:
+        context: ./docker/spark
+      image: sport-spark:3.5.3
+      container_name: sport-spark-master
+      restart: unless-stopped
+      environment:
+        SPARK_NO_DAEMONIZE: "true"
+        POSTGRES_USER: ${POSTGRES_USER}
+        POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+        MINIO_ENDPOINT: http://minio:9000
+        MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+        MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+        GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY}
+        OFFICE_ADDRESS: ${OFFICE_ADDRESS}
+        PYSPARK_PYTHON: /usr/bin/python3.11
+        PYSPARK_DRIVER_PYTHON: /usr/bin/python3.11
+      command: ["/opt/spark/sbin/start-master.sh"]
+      ports:
+        - "8081:8080"
+        - "7077:7077"
+      volumes:
+        - ./jobs:/opt/spark/jobs:ro
+      networks: [sport-net]
+
+  spark-worker:
+    image: sport-spark:3.5.3
+    container_name: sport-spark-worker
+    restart: unless-stopped
+    depends_on: [spark-master]
+    environment:
+      SPARK_NO_DAEMONIZE: "true"
+      SPARK_WORKER_CORES: "2"
+      SPARK_WORKER_MEMORY: "2G"
+    command: ["/opt/spark/sbin/start-worker.sh", "spark://spark-master:7077"]
+    ports:
+      - "8082:8081"
+    volumes:
+      - ./jobs:/opt/spark/jobs:ro
+    networks: [sport-net]
+
+  # Spark Streaming — job permanent slack-notifier
+  spark-streaming:
+    image: sport-spark:3.5.3
+    container_name: sport-spark-streaming
+    restart: unless-stopped
+    depends_on:
+      spark-master:
+        condition: service_started
+      kafka-connect:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL}
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+    volumes:
+      - ./jobs:/opt/spark/jobs:ro
+    command: >
+      bash -c "
+      sleep 30 &&
+      /opt/spark/bin/spark-submit
+      --master spark://spark-master:7077
+      --deploy-mode client
+      --conf spark.driver.host=spark-streaming
+      --conf spark.executor.memory=1g
+      --conf spark.driver.memory=512m
+      --conf spark.cores.max=1
+      /opt/spark/jobs/streaming/slack_notifier.py
+      "
+    networks: [sport-net]
+
+  # Airflow — orchestrateur 
+  airflow:
+    build:
+      context: ./docker/airflow
+    image: sport-airflow:2.10.3
+    container_name: sport-airflow
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+      AIRFLOW_CONN_SPARK_DEFAULT: spark://spark%3A%2F%2Fspark-master:7077
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_USER}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_PASSWORD}
+      AIRFLOW__WEBSERVER__WEB_SERVER_MASTER_TIMEOUT: "300" # timeout et retry du démarrage du webserver
+      AIRFLOW__WEBSERVER__WORKERS: "2"
+      # Variables propagées aux DAGs
+      SPARK_MASTER_URL: spark://spark-master:7077
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY}
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+
+    ports:
+      - "8088:8080"     # UI sur http://localhost:8088
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./jobs:/opt/airflow/jobs:ro
+      - airflow_logs:/opt/airflow/logs
+    command: standalone
+    networks: [sport-net]
+
+  # Simulateur Strava — produit des activités en continu (+ historique)
+  simulator:
+    build:
+      context: ./docker/simulator
+    container_name: sport-simulator
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      SIMULATOR_MODE: bootstrap_then_live   # 'bootstrap' | 'live' | 'bootstrap_then_live'
+      SIMULATOR_INTERVAL_SECONDS: 300       # une activité toutes les ~5 min en mode live
+    volumes:
+      - ./data:/data:ro                     # fichiers RH et sport en lecture seule
+    networks: [sport-net]
+
+  # Monitoring — Prometheus + Grafana
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: sport-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks: [sport-net]
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: sport-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "3000:3000"     # http://localhost:3000
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on: [prometheus]
+    networks: [sport-net]
+
+  # Tests
+  great-expectations:
+      build:
+        context: ./docker/great-expectations
+      container_name: sport-great-expectations
+      profiles: ["tests"]
+      environment:
+        PG_HOST: postgres
+        PG_PORT: 5432
+        PG_USER: sportadmin
+        PG_PASSWORD: ${POSTGRES_PASSWORD}
+        PG_DB: sportdata
+      volumes:
+        - ./tests:/app
+      networks:
+        - sport-net
+      depends_on:
+        postgres:
+          condition: service_healthy
+# =====================================================================
+networks:
+  sport-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redpanda_data:
+  minio_data:
+  airflow_logs:
+  prometheus_data:
+  grafana_data:

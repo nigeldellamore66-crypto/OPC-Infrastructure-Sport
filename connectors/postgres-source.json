@@ -1,0 +1,33 @@
+{
+  "name": "postgres-cdc-source",
+  "config": {
+    "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+    "tasks.max": "1",
+    "database.hostname": "postgres",
+    "database.port": "5432",
+    "database.user": "debezium",
+    "database.password": "debezium_replication_pwd",
+    "database.dbname": "sportdata",
+    "topic.prefix": "cdc",
+    "plugin.name": "pgoutput",
+    "publication.name": "debezium_pub",
+    "publication.autocreate.mode": "disabled",
+    "slot.name": "debezium_slot",
+    "schema.include.list": "hr,ops",
+    "table.include.list": "hr.employees,ops.activities",
+    "tombstones.on.delete": "false",
+    "transforms": "unwrap",
+    "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
+    "transforms.unwrap.drop.tombstones": "false",
+    "transforms.unwrap.delete.handling.mode": "rewrite",
+    "transforms.unwrap.add.fields": "op,source.ts_ms,source.lsn",
+    "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "key.converter.schemas.enable": "false",
+    "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+    "value.converter.schemas.enable": "false",
+    "snapshot.mode": "initial",
+    "heartbeat.interval.ms": "10000",
+    "decimal.handling.mode": "double",
+    "time.precision.mode": "connect"
+  }
+}
